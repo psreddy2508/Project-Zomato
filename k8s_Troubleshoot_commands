@@ -1,0 +1,79 @@
+Kubernetes Project – Troubleshooting Commands with Explanations
+1. Check Container Runtime
+sudo systemctl status containerd
+(Checks whether the containerd container runtime is active and running.)
+2. Check Kubernetes Nodes
+kubectl get nodes -o wide
+(Displays all Kubernetes nodes, their status, IP addresses, roles and Kubernetes versions.)
+3. Check Kubernetes System Pods
+kubectl get pods -n kube-system -o wide
+(Checks Kubernetes system components such as CoreDNS, kube-proxy and Calico.)
+4. Check Calico Network Interface
+ip -d link show tunl0
+(Checks the Calico IP-in-IP tunnel interface and its network configuration.)
+5. Check Kubernetes API Server Connectivity
+curl -k --connect-timeout 5 https://172.31.24.71:6443/version
+(Tests connectivity to the Kubernetes API server running on the master node. The -k option skips certificate verification for this connectivity test.)
+6. Check DNS Resolution from Master
+kubectl exec dns-master-test -- nslookup kubernetes.default.svc.cluster.local 10.96.0.10
+(Tests DNS resolution through the CoreDNS Kubernetes Service IP from a pod on the master.)
+kubectl exec dns-master-test -- nslookup kubernetes.default.svc.cluster.local 192.168.235.196
+(Tests DNS resolution directly through a CoreDNS pod IP.)
+7. Check DNS Resolution from Worker
+kubectl exec dns-worker-test -- nslookup kubernetes.default.svc.cluster.local 192.168.235.196
+(Tests whether a worker-node pod can communicate with the CoreDNS pod on the master.)
+kubectl exec dns-worker-test -- nslookup kubernetes.default.svc.cluster.local 10.96.0.10
+(Tests DNS resolution through the CoreDNS Service IP from the worker.)
+8. Check Kubernetes Service Connectivity
+kubectl exec net-test -- curl -k -v --connect-timeout 5 https://10.96.0.1:443/version
+(Tests connectivity from a pod to the Kubernetes API Service IP.)
+9. Check Calico Networking
+kubectl get pods -n calico-system -o wide
+(Checks Calico networking pods and identifies which nodes they are running on.)
+kubectl get ippools.crd.projectcalico.org
+(Displays Calico IP pools configured for pod networking.)
+10. Check GitHub Repository Branch
+git ls-remote --heads https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git
+(Checks the remote GitHub repository branches and identifies the correct branch. We confirmed that the branch is master.)
+11. Clone GitHub Repository
+git clone https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git /tmp/zomato-check
+(Downloads the Zomato project repository to the master node for inspecting Kubernetes manifests.)
+12. Inspect Kubernetes YAML Files
+cat /tmp/zomato-check/Kubernetes/deployment.yaml
+(Displays the Zomato Deployment manifest.)
+cat /tmp/zomato-check/Kubernetes/service.yaml
+(Displays the Zomato Service manifest.)
+cat /tmp/zomato-check/Kubernetes/node-service.yaml
+(Displays the Node Exporter Service manifest that caused the Argo CD synchronization error.)
+13. Identify Node Exporter Configuration
+grep -RniE 'node-exporter|prometheus-node-exporter' /tmp/zomato-check/Kubernetes/
+(Searches all files under the Kubernetes directory for Node Exporter references.)
+14. Remove Unwanted Node Exporter Manifest
+cd /tmp/zomato-check
+(Changes the working directory to the cloned project.)
+rm -f Kubernetes/node-service.yaml
+(Removes the Node Exporter Service YAML file from the local repository because monitoring is not part of the current project.)
+15. Check Argo CD Application
+kubectl get applications -n argocd
+(Displays Argo CD applications and their synchronization and health status.)
+kubectl describe application zomato -n argocd
+(Displays detailed information about the Zomato Argo CD application, including Git revision, sync errors and managed resources.)
+16. Refresh Argo CD
+kubectl annotate application zomato -n argocd argocd.argoproj.io/refresh=hard --overwrite
+(Forces Argo CD to refresh its repository information and recalculate application status.)
+17. Check Zomato Pods
+kubectl get pods -n default -o wide
+(Checks Zomato pod status, readiness, restart count, pod IP and worker-node placement.)
+18. Check Zomato Service
+kubectl get svc zomato -n default
+(Checks the Zomato Service type, ClusterIP and NodePort configuration.)
+19. Check Argo CD Services
+kubectl get svc -n argocd
+(Displays Argo CD Services, including argocd-server, which provides dashboard access.)
+20. Access Argo CD Dashboard
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+(Forwards local port 8080 to the Argo CD HTTPS service port 443. Access it locally through https://localhost:8080.)
+21. Retrieve Initial Argo CD Password
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
+(Retrieves and decodes the initial Argo CD admin password, if the initial secret still exists.)
+

@@ -1,0 +1,465 @@
+Complete Kubernetes Project – AWS EC2, kubeadm, Calico, Argo CD and Zomato
+Consolidated Commands from Create EKS Cluster (1–9)
+Purpose: Complete project setup, troubleshooting, deployment and verification reference.
+Important: This is a kubeadm Kubernetes cluster hosted on AWS EC2, not Amazon EKS.
+
+1. Project Environment
+Component	Configuration
+Cloud	AWS EC2
+Master	k8s-master
+Master private IP	172.31.24.71
+Worker	k8s-worker1
+Worker private IP	172.31.16.191
+Operating system	Ubuntu (26.04.1 in the later troubleshooting session)
+Kubernetes	v1.37.2
+Container runtime	containerd 2.2.2
+CNI	Calico v3.33.0
+Pod CIDR	192.168.0.0/16
+Service CIDR	10.96.0.0/12
+Argo CD namespace	argocd
+Application	Zomato
+GitHub branch	master
+Application NodePort	30001
+2. AWS EC2 Infrastructure Preparation
+We created two EC2 instances in the same VPC.
+* One instance for Kubernetes master.
+* One instance for Kubernetes worker.
+* Both instances communicate through their private IP addresses.
+AWS Security Group configuration
+Configure the following connectivity between the master and worker:
+Port / Protocol	Purpose
+TCP 22	SSH access
+TCP 6443	Kubernetes API server
+TCP 10250	Kubelet API
+TCP 2379–2380	etcd communication for control-plane nodes
+TCP 179	Calico BGP
+IP protocol 4	Calico IP-in-IP tunnel
+Allow other Kubernetes node communication ports as required by your cluster configuration.
+Important AWS configuration:
+* Disable EC2 source/destination checks on both instances.
+* Allow IP protocol 4 between the nodes.
+* Allow TCP 179 between the nodes when using Calico BGP.
+* Configure reciprocal node-to-node security group rules where necessary.
+(These settings allow Kubernetes nodes and Calico to communicate across EC2 instances.)
+3. Linux Server Preparation
+Run the following commands on both master and worker nodes.
+3.1 Check operating system
+cat /etc/os-release
+(Displays Linux distribution and version.)
+hostname
+(Displays the current server hostname.)
+ip addr
+(Displays network interfaces and IP addresses.)
+3.2 Disable swap
+sudo swapoff -a
+(Temporarily disables swap. Kubernetes kubelet requires swap to be disabled unless configured to support swap.)
+sudo sed -i '/ swap / s/^/#/' /etc/fstab
+(Comments out swap entries in /etc/fstab so swap remains disabled after reboot.)
+3.3 Load required kernel modules
+sudo modprobe overlay
+(Loads the overlay filesystem module used by container runtimes.)
+sudo modprobe br_netfilter
+(Enables bridge network traffic to be processed by netfilter.)
+3.4 Configure kernel modules
+sudo tee /etc/modules-load.d/k8s.conf <<EOF
+overlay
+br_netfilter
+EOF
+(Creates a configuration file to load the required kernel modules automatically after reboot.)
+3.5 Configure networking parameters
+sudo tee /etc/sysctl.d/k8s.conf <<EOF
+net.bridge.bridge-nf-call-iptables = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward = 1
+EOF
+(Creates persistent kernel networking settings required for Kubernetes pod networking and IP forwarding.)
+sudo sysctl --system
+(Loads all configured sysctl settings.)
+3.6 Verify the configuration
+lsmod | grep -E 'overlay|br_netfilter'
+(Checks whether the required kernel modules are loaded.)
+sysctl net.ipv4.ip_forward
+(Checks whether IPv4 forwarding is enabled.)
+4. Container Runtime – containerd
+Run on both nodes.
+4.1 Check containerd
+sudo systemctl status containerd
+(Checks whether containerd is installed and running.)
+sudo systemctl enable containerd
+(Enables containerd to start automatically during server boot.)
+4.2 Generate containerd configuration
+sudo mkdir -p /etc/containerd
+(Creates the containerd configuration directory.)
+containerd config default | sudo tee /etc/containerd/config.toml
+(Generates the default containerd configuration file.)
+4.3 Configure systemd cgroup driver
+Edit:
+sudo nano /etc/containerd/config.toml
+(Find the runc options and configure SystemdCgroup to true. This aligns the container runtime cgroup driver with kubelet.)
+SystemdCgroup = true
+4.4 Restart containerd
+sudo systemctl restart containerd
+(Restarts containerd to apply configuration changes.)
+sudo systemctl status containerd
+(Verifies that containerd is active.)
+5. Kubernetes Installation
+Run on both master and worker.
+5.1 Install Kubernetes components
+Install the Kubernetes packages from the configured Kubernetes apt repository.
+The required packages are:
+* kubelet – Kubernetes node agent.
+* kubeadm – Cluster initialization and node joining tool.
+* kubectl – Kubernetes command-line administration tool.
+sudo apt-get update
+(Refreshes Ubuntu package indexes.)
+sudo apt-get install -y kubelet kubeadm kubectl
+(Installs Kubernetes node and administration components. The package repository must be configured first.)
+sudo apt-mark hold kubelet kubeadm kubectl
+(Prevents automatic package upgrades from changing Kubernetes versions unexpectedly.)
+5.2 Verify versions
+kubeadm version
+(Displays the kubeadm version.)
+kubectl version --client
+(Displays the kubectl client version.)
+kubelet --version
+(Displays the kubelet version.)
+6. Initialize Kubernetes Master
+Run only on k8s-master.
+6.1 Initialize the cluster
+sudo kubeadm init \
+  --apiserver-advertise-address=172.31.24.71 \
+  --pod-network-cidr=192.168.0.0/16
+(Initializes the Kubernetes control plane. The master private IP is used as the API server advertise address. The pod CIDR defines the IP range for Kubernetes pods.)
+Important: This is the actual pod CIDR used in the later cluster configuration. Do not replace it with the earlier example CIDR 10.244.0.0/16.
+6.2 Configure kubectl
+mkdir -p $HOME/.kube
+(Creates the kubeconfig directory for the current user.)
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+(Copies the Kubernetes administrator configuration into the user's home directory.)
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+(Changes ownership of the kubeconfig file to the current user.)
+6.3 Check master node
+kubectl get nodes -o wide
+(Displays the cluster nodes. The master may initially show NotReady until the CNI networking plugin is installed.)
+7. Join Kubernetes Worker
+Run on k8s-master to generate a join command:
+sudo kubeadm token create --print-join-command
+(Generates a worker join command containing a bootstrap token and CA certificate hash.)
+Run the generated command on k8s-worker1. The command follows this format:
+sudo kubeadm join 172.31.24.71:6443 \
+  --token <TOKEN> \
+  --discovery-token-ca-cert-hash sha256:<CA_HASH>
+(Joins the worker to the master using the Kubernetes API endpoint, bootstrap token and certificate authority hash. Use the actual generated values.)
+7.1 Verify worker connectivity to master
+nc -vz -w 5 172.31.24.71 6443
+(Checks whether the worker can reach the master API server on TCP port 6443. A successful connection confirms network-level TCP connectivity.)
+7.2 Check kubelet
+sudo systemctl status kubelet
+(Checks whether the kubelet service is running.)
+sudo journalctl -u kubelet -n 40 --no-pager
+(Displays the latest 40 kubelet log entries for troubleshooting.)
+7.3 Verify cluster nodes
+Run on master:
+kubectl get nodes -o wide
+(Verifies that master and worker have successfully joined the cluster.)
+8. Calico Network Installation
+We used Calico v3.33.0 with IP-in-IP networking.
+8.1 Install Calico CRDs
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/operator-crds.yaml
+(Installs the custom resource definitions required by the Calico operator.)
+8.2 Install Tigera operator
+kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.33.0/manifests/tigera-operator.yaml
+(Installs the operator responsible for managing Calico.)
+8.3 Calico configuration
+The Calico installation must use:
+* Pod CIDR: 192.168.0.0/16
+* IPIP mode: Always
+* VXLAN mode: Never
+* NAT outgoing: true
+* Block size: /26
+(These settings define the pod IP allocation and cross-node encapsulation behavior.)
+8.4 Check Calico pods
+kubectl get pods -n calico-system -o wide
+(Displays Calico pods and identifies whether they are running on both nodes.)
+kubectl get ippools.crd.projectcalico.org -o yaml
+(Displays the Calico IP pool configuration, including CIDR and encapsulation settings.)
+ip -d link show tunl0
+(Checks the IP-in-IP tunnel interface on the Linux node.)
+9. Troubleshooting Kubernetes Networking
+This was one of the major issues in our project.
+9.1 Check API server connectivity
+curl -k --connect-timeout 5 https://172.31.24.71:6443/version
+(Tests access to the Kubernetes API server from a node or host.)
+9.2 Check Kubernetes Service
+kubectl get svc kubernetes
+(Displays the default Kubernetes API Service.)
+kubectl get endpoints kubernetes
+(Checks the backend API server endpoint associated with the Kubernetes Service.)
+9.3 Check Calico tunnel
+ip -d link show tunl0
+(Displays tunnel interface status and packet information.)
+9.4 Check worker networking
+kubectl get pods -o wide
+(Displays pod IPs and node placement.)
+9.5 Check Kubernetes API from a test pod
+kubectl exec net-test -- curl -k -v --connect-timeout 5 https://10.96.0.1:443/version
+(Tests whether a pod can reach the Kubernetes API through its ClusterIP Service.)
+9.6 Check DNS from master
+kubectl exec dns-master-test -- nslookup kubernetes.default.svc.cluster.local 10.96.0.10
+(Tests DNS resolution through the CoreDNS Service from the master-side test pod.)
+kubectl exec dns-master-test -- nslookup kubernetes.default.svc.cluster.local 192.168.235.196
+(Tests DNS resolution directly through a CoreDNS pod IP.)
+9.7 Check DNS from worker
+kubectl exec dns-worker-test -- nslookup kubernetes.default.svc.cluster.local 192.168.235.196
+(Tests direct communication from the worker-side test pod to a CoreDNS pod on the master.)
+kubectl exec dns-worker-test -- nslookup kubernetes.default.svc.cluster.local 10.96.0.10
+(Tests DNS through the CoreDNS Service from the worker.)
+9.8 Networking fix applied in AWS
+We identified that the Calico IP-in-IP packets were not reaching the other node.
+Fix: Added IP protocol 4 to the AWS Security Group rules for node-to-node communication.
+(Protocol 4 is IP-in-IP encapsulation. It is not TCP port 4 or UDP port 4.)
+After applying this change, the worker DNS tests succeeded and resolved:
+kubernetes.default.svc.cluster.local
+10.96.0.1
+10. Argo CD Installation
+Run on master.
+10.1 Create namespace
+kubectl create namespace argocd
+(Creates the dedicated namespace for Argo CD.)
+10.2 Install Argo CD
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+(Installs Argo CD components in the argocd namespace. Use a pinned release manifest for repeatable production deployments.)
+10.3 Verify installation
+kubectl get pods -n argocd -o wide
+(Checks Argo CD pods and their status.)
+kubectl get svc -n argocd
+(Displays Argo CD Services, including argocd-server.)
+11. Access Argo CD Dashboard
+11.1 Port forwarding
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+(Forwards local port 8080 to the Argo CD HTTPS service port 443.)
+Open the dashboard:
+https://localhost:8080
+(Use this URL on the machine running the port-forward command. For remote access from your Mac, use an SSH tunnel rather than exposing port 8080 publicly.)
+11.2 Retrieve initial password
+kubectl -n argocd get secret argocd-initial-admin-secret \
+  -o jsonpath="{.data.password}" | base64 -d; echo
+(Retrieves and decodes the initial Argo CD admin password, if the initial secret still exists.)
+Username:
+admin
+12. GitHub Repository Integration
+GitHub repository:
+https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git
+12.1 Check repository branch
+git ls-remote --heads https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git
+(Checks remote branches. We identified master as the correct branch instead of main.)
+12.2 Clone repository
+git clone https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git /tmp/zomato-check
+(Clones the public GitHub repository into the local directory /tmp/zomato-check.)
+12.3 Enter project directory
+cd /tmp/zomato-check
+(Moves into the cloned Git repository.)
+12.4 Check project files
+ls -l
+(Displays files and directories in the repository.)
+ls -l Kubernetes/
+(Displays Kubernetes manifest files.)
+12.5 Inspect manifests
+cat Kubernetes/deployment.yaml
+(Displays the Zomato Deployment manifest.)
+cat Kubernetes/service.yaml
+(Displays the Zomato Service manifest.)
+cat Kubernetes/node-service.yaml
+(Displays the Node Exporter Service manifest.)
+12.6 Search for Node Exporter configuration
+grep -RniE 'node-exporter|prometheus-node-exporter' Kubernetes/
+(Searches the Kubernetes directory for Node Exporter references.)
+12.7 Remove unwanted Node Exporter manifest
+rm -f Kubernetes/node-service.yaml
+(Removes the Node Exporter Service manifest from the local repository. We did this because monitoring was not part of the current project.)
+12.8 Git repository update
+git fetch origin
+(Downloads the latest remote branch and commit information.)
+git status
+(Displays local changes and staged or unstaged files.)
+git add -A
+(Staging additions, modifications and deletions.)
+git commit -m "Remove Node Exporter service"
+(Creates a commit recording the removal.)
+git push origin master
+(Pushes the commit to the remote master branch.)
+12.9 Verify remote files
+git ls-tree -r --name-only origin/master Kubernetes/
+(Checks the files tracked in the remote master branch. The node-service.yaml file should no longer appear.)
+13. Argo CD GitHub Repository Configuration
+13.1 Repository Secret
+Example file: repo-secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: zomato-github-repo
+  namespace: argocd
+  labels:
+    argocd.argoproj.io/secret-type: repository
+stringData:
+  type: git
+  url: https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git
+Apply:
+kubectl apply -f repo-secret.yaml
+(Registers the GitHub repository with Argo CD. This is the public repository used for our project.)
+13.2 Argo CD Application manifest
+Example file: zomato-app.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zomato
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/psreddy2508/DevOps-Project-Zomato-Kastro.git
+    targetRevision: master
+    path: Kubernetes
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+Apply:
+kubectl apply -f zomato-app.yaml
+(Creates the Argo CD Application. It watches the master branch and the Kubernetes directory in GitHub.)
+13.3 Correct the Git branch
+kubectl patch application zomato -n argocd \
+  --type merge \
+  -p '{"spec":{"source":{"targetRevision":"master"}}}'
+(Changes the Argo CD target revision from main to master. We used this because the actual GitHub branch was master.)
+13.4 Refresh the application
+kubectl annotate application zomato -n argocd \
+  argocd.argoproj.io/refresh=hard --overwrite
+(Forces Argo CD to refresh repository information and compare the Git source with the live cluster.)
+13.5 Check synchronization status
+kubectl get applications -n argocd
+(Displays application sync and health status.)
+kubectl describe application zomato -n argocd
+(Displays detailed sync status, Git revision, resources, events and errors.)
+14. Zomato Application Deployment
+The repository contains:
+Kubernetes/
+├── deployment.yaml
+└── service.yaml
+We removed node-service.yaml because it was an unrelated monitoring Service referencing a missing namespace.
+14.1 Deployment manifest
+File: Kubernetes/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zomato
+  labels:
+    app: zomato
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: zomato
+  template:
+    metadata:
+      labels:
+        app: zomato
+    spec:
+      containers:
+      - name: zomato
+        image: kastrov/zomato:latest
+        ports:
+        - containerPort: 3000
+(Deploys two Zomato application replicas using the Docker image kastrov/zomato:latest. The container is configured for port 3000.)
+14.2 Service manifest
+File: Kubernetes/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: zomato
+  labels:
+    app: zomato
+spec:
+  type: NodePort
+  ports:
+  - port: 3000
+    targetPort: 3000
+    nodePort: 30001
+  selector:
+    app: zomato
+(Creates a NodePort Service. It listens on port 30001 on each node and forwards requests to application pods on port 3000.)
+15. Zomato Application Verification
+15.1 Check pods
+kubectl get pods -n default -o wide
+(Displays Zomato pods, readiness, status, restarts, pod IP and node placement.)
+15.2 Check Deployment
+kubectl get deployment zomato -n default
+(Checks desired, current and available replicas.)
+15.3 Check Service
+kubectl get svc zomato -n default
+(Checks Service type, ClusterIP and NodePort.)
+15.4 Describe Deployment
+kubectl describe deployment zomato -n default
+(Displays deployment details, replica status and related events.)
+15.5 Check application logs
+kubectl logs deployment/zomato -n default --tail=50
+(Displays the latest 50 log lines from a selected Zomato pod.)
+15.6 Check Service endpoints
+kubectl get endpoints zomato -n default
+(Checks which pod IP addresses are registered as backend endpoints for the Zomato Service.)
+15.7 Test NodePort
+curl -I http://127.0.0.1:30001
+(Tests HTTP connectivity to the NodePort from the node. The HTTP response depends on application behavior.)
+15.8 Open the application
+http://<EC2-PUBLIC-IP>:30001
+(Opens Zomato from a browser. Allow inbound TCP port 30001 in the EC2 Security Group, preferably only from your public IP.)
+16. Final Cluster Verification
+Run these commands on k8s-master.
+kubectl get nodes -o wide
+(Verifies master and worker readiness.)
+kubectl get pods -A -o wide
+(Checks pods across all namespaces.)
+kubectl get svc -A
+(Checks Services across all namespaces.)
+kubectl get applications -n argocd
+(Verifies Argo CD application synchronization and health.)
+kubectl get deployment zomato -n default
+(Verifies the Zomato Deployment and replica availability.)
+kubectl get svc zomato -n default
+(Verifies the NodePort Service.)
+kubectl get endpoints zomato -n default
+(Verifies that the Service has application pod backends.)
+17. Troubleshooting Results from Our Project
+Issue	Root cause	Resolution
+Worker could not communicate with master API	Network connectivity issue	Verified TCP 6443 using nc
+Worker pod DNS timeout	Calico IP-in-IP traffic blocked	Added AWS Security Group IP protocol 4
+CoreDNS lookup failed from worker	Cross-node pod networking failure	Fixed IP-in-IP communication
+Argo CD could not resolve main branch	Repository branch was master	Changed targetRevision to master
+Argo CD OutOfSync	Node Exporter Service referenced missing namespace	Removed unwanted manifest from repository; remote deletion still needed verification
+Browser connection refused	Application exposure was not ready at the earlier test	Deployed Zomato and configured NodePort 30001
+18. Current Known Project Status
+Based on the latest command outputs shared:
+* Kubernetes master and worker: cluster networking established.
+* Calico: IP-in-IP networking issue resolved.
+* CoreDNS: master and worker DNS tests succeeded.
+* Argo CD: installed and application created.
+* GitHub: repository branch master identified.
+* Zomato Deployment: two pods Running and Ready.
+* Zomato Service: NodePort 30001.
+* Argo CD application: previously showed OutOfSync because the remote repository still contained the Node Exporter manifest. Final GitHub deletion and sync status need verification.
+No cluster reset or reinstallation is required based on the issues observed.
+
+Important scope and command notes
+1. This is a consolidated project runbook, not an exported terminal history. It includes the setup sequence and troubleshooting commands discussed across the conversations. Some initial installation commands are reconstructed as standard kubeadm setup steps where the complete original terminal history is unavailable.
+2. Commands using <TOKEN> and <CA_HASH> require the actual values generated by your cluster.
+3. The kubeadm init, Calico installation and Argo CD installation commands are setup commands; do not rerun them on an already working cluster without a specific reason.
+4. Commands that change AWS Security Groups or EC2 source/destination checks are performed in the AWS console unless you explicitly use AWS CLI.
+5. Prometheus, Grafana and Node Exporter are excluded from the project deployment.
+6. Do not expose the Argo CD dashboard or NodePort to the entire internet without appropriate access restrictions.
+End of project command reference.
+
